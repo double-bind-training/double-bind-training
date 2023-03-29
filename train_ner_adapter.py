@@ -42,7 +42,7 @@ from transformers import (
     WEIGHTS_NAME,
     AdamW,
     AutoConfig,
-    AutoTokenizer,
+    XLMRobertaTokenizer,
     AutoAdapterModel,
     get_linear_schedule_with_warmup,
 )
@@ -627,7 +627,7 @@ def main():
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
 
     args.model_type = args.model_type.lower()
-    config_class, model_class, tokenizer_class = AutoConfig, AutoAdapterModel, AutoTokenizer #MODEL_CLASSES[args.model_type]
+    config_class, model_class, tokenizer_class = AutoConfig, AutoAdapterModel, XLMRobertaTokenizer #MODEL_CLASSES[args.model_type]
     
     model = model_class.from_pretrained(args.model_name_or_path)
     

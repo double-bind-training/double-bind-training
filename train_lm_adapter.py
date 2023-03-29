@@ -40,7 +40,7 @@ from transformers import (
     AdapterTrainer,
     AutoConfig,
     AutoModelForMaskedLM,
-    AutoTokenizer,
+    XLMRobertaTokenizer,
     DataCollatorForLanguageModeling,
     HfArgumentParser,
     MultiLingAdapterArguments,
@@ -379,9 +379,9 @@ def main():
         "use_auth_token": True if model_args.use_auth_token else None,
     }
     if model_args.tokenizer_name:
-        tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, **tokenizer_kwargs)
+        tokenizer = XLMRobertaTokenizer.from_pretrained(model_args.tokenizer_name, **tokenizer_kwargs)
     elif model_args.model_name_or_path:
-        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
+        tokenizer = XLMRobertaTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
     else:
         raise ValueError(
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
