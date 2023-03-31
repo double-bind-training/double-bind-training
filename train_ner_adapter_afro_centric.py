@@ -43,6 +43,7 @@ from transformers import (
     AdamW,
     AutoConfig,
     AutoTokenizer,
+    XLMRobertaTokenizer,
     AutoAdapterModel,
     get_linear_schedule_with_warmup,
 )
