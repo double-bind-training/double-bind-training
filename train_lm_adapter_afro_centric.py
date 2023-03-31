@@ -473,22 +473,41 @@ def main():
         column_names = raw_datasets["validation"].column_names
     text_column_name = "text" if "text" in column_names else column_names[0]
 
-    if data_args.max_seq_length is None:
-        print(config.max_length,'\n\n\n\n\n')
-        max_seq_length = config.max_length
-        if max_seq_length > 1024:
-            logger.warning(
-                f"The tokenizer picked seems to have a very large `model_max_length` ({tokenizer.model_max_length}). "
-                "Picking 1024 instead. You can change that default value by passing --max_seq_length xxx."
-            )
-            max_seq_length = 1024
+    if model_args.model_name_or_path=='bonadossou/afrolm_active_learning':
+        if data_args.max_seq_length is None:
+            print(config.max_length,'\n\n\n\n\n')
+            max_seq_length = config.max_length
+            if max_seq_length > 1024:
+                logger.warning(
+                    f"The tokenizer picked seems to have a very large `model_max_length` ({tokenizer.model_max_length}). "
+                    "Picking 1024 instead. You can change that default value by passing --max_seq_length xxx."
+                )
+                max_seq_length = 1024
+        else:
+            if data_args.max_seq_length > tokenizer.model_max_length:
+                logger.warning(
+                    f"The max_seq_length passed ({data_args.max_seq_length}) is larger than the maximum length for the"
+                    f"model ({tokenizer.model_max_length}). Using max_seq_length={tokenizer.model_max_length}."
+                )
+            max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length)
+    
     else:
-        if data_args.max_seq_length > tokenizer.model_max_length:
-            logger.warning(
-                f"The max_seq_length passed ({data_args.max_seq_length}) is larger than the maximum length for the"
-                f"model ({tokenizer.model_max_length}). Using max_seq_length={tokenizer.model_max_length}."
-            )
-        max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length)
+        if data_args.max_seq_length is None:
+            print(tokenizer.model_max_length,'\n\n\n\n\n')
+            max_seq_length = tokenizer.model_max_length
+            if max_seq_length > 1024:
+                logger.warning(
+                    f"The tokenizer picked seems to have a very large `model_max_length` ({tokenizer.model_max_length}). "
+                    "Picking 1024 instead. You can change that default value by passing --max_seq_length xxx."
+                )
+                max_seq_length = 1024
+        else:
+            if data_args.max_seq_length > tokenizer.model_max_length:
+                logger.warning(
+                    f"The max_seq_length passed ({data_args.max_seq_length}) is larger than the maximum length for the"
+                    f"model ({tokenizer.model_max_length}). Using max_seq_length={tokenizer.model_max_length}."
+                )
+            max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length)
 
     if data_args.line_by_line:
         # When using line_by_line, we just tokenize each nonempty line.
