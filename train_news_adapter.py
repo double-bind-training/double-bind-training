@@ -48,7 +48,7 @@ from transformers import (
 )
 
 import wandb
-from utils_pos import convert_examples_to_features, get_labels, read_examples_from_file
+from utils_news import convert_examples_to_features, get_labels, read_examples_from_file
 from torch.utils.data import DataLoader
 
 
@@ -453,7 +453,6 @@ def main():
         required=True,
         help="The output directory where the model predictions and checkpoints will be written.",
     )
-
     parser.add_argument(
         "--test_result_file",
         default="test_results.txt",
@@ -491,6 +490,12 @@ def main():
         default="",
         type=str,
         help="Where do you want to store the pre-trained models downloaded from s3",
+    )
+    parser.add_argument(
+        "--header",
+        default="0",
+        type=int,
+        help="If you want to pass both headline and text enter one else zero",
     )
     parser.add_argument(
         "--max_seq_length",
@@ -561,7 +566,7 @@ def main():
 
     args = parser.parse_args()
     
-    wandb.init(project="masakhane-pos-test-run", entity="double-bind-ner", tags=args.tags.split(','), config = {
+    wandb.init(project="masakhane-news-test-run", entity="double-bind-ner", tags=args.tags.split(','), config = {
         "max length": os.getenv('MAX_LENGTH'),
         "adapter model": os.getenv('ADAPTER_MODEL'),
         "output dir": os.getenv('OUTPUT_DIR'),
