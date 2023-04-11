@@ -492,12 +492,6 @@ def main():
         help="Where do you want to store the pre-trained models downloaded from s3",
     )
     parser.add_argument(
-        "--header",
-        default="0",
-        type=int,
-        help="If you want to pass both headline and text enter one else zero",
-    )
-    parser.add_argument(
         "--max_seq_length",
         default=128,
         type=int,
