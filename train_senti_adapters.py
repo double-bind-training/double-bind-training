@@ -48,7 +48,7 @@ from transformers import (
 )
 
 import wandb
-from utils_news import convert_examples_to_features, get_labels, read_examples_from_file
+from utils_sentiment import convert_examples_to_features, get_labels, read_examples_from_file
 from torch.utils.data import DataLoader
 
 
