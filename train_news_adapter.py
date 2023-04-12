@@ -377,7 +377,7 @@ def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode):
         features = torch.load(cached_features_file)
     else:
         print("Creating features from dataset file at", args.data_dir)
-        examples = read_examples_from_file(args.data_dir, mode)
+        examples = read_examples_from_file(args,args.data_dir, mode)
         features = convert_examples_to_features(
             examples,
             labels,
