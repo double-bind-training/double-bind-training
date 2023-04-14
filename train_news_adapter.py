@@ -73,7 +73,7 @@ def set_seed(args):
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
-def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, adapter_name):
+def train(args, train_dataset, dev_dataset, labels, model, tokenizer,  adapter_name):
     model.train_adapter(adapter_name)
     """ Train the model """
     if args.local_rank in [-1, 0]:
