@@ -92,7 +92,7 @@ def convert_examples_to_features(instances, tokenizer, labels, max_seq_length):
             logger.info(f"  text: {instance.texts}")
             logger.info(f"  tokens (by input): {tokenizer.tokenize(instance.texts)}")
             logger.info(f"  token_ids: {tokenization_result['input_ids']}")
-            logger.info(f"  token_type_ids: {tokenization_result['token_type_ids']}")
+            # logger.info(f"  token_type_ids: {tokenization_result['token_type_ids']}")
             logger.info(f"  attention mask: {tokenization_result['attention_mask']}")
 
         features.append(
