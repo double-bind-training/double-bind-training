@@ -201,8 +201,8 @@ def train(args, train_dataset, dev_dataset, labels, model, tokenizer,  adapter_n
 
         # EVALUATE + EARLY STOPPING
         if global_step > 500 and args.n_gpu == 1: # and global_step % args.save_steps == 0:
-            eval_results, _ = evaluate(args, model, tokenizer, labels, "dev")
-            f1_step = round(eval_results["acc"], 5)
+            eval_results, _ = evaluate(args, model, tokenizer, labels, "dev", display_res=True)
+            f1_step = round(eval_results["eval_acc"], 5)
             eval_fones.append(f1_step)
             print("eval result: ", global_step, f1_step)
 
@@ -251,7 +251,7 @@ def train(args, train_dataset, dev_dataset, labels, model, tokenizer,  adapter_n
     return global_step, tr_loss / global_step
 
 
-def evaluate(args, model, tokenizer, labels, mode, prefix=""):
+def evaluate(args, model, tokenizer, labels, mode, prefix="", display_res=False):
     eval_dataset = load_and_cache_examples(args, tokenizer, labels, mode)
     
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
@@ -313,15 +313,21 @@ def evaluate(args, model, tokenizer, labels, mode, prefix=""):
     #     logger.info("***** Eval results {} *****".format(prefix))
     #     for key in sorted(results.keys()):
     #         logger.info("  %s = %s", key, str(results[key]))
-
+  #  results = {
+  #       "loss": eval_loss,
+  #       "precision": eval_report["weighted avg"]["precision"],
+  #       "recall": eval_report["weighted avg"]["recall"],
+  #       "acc": sklearn.metrics.accuracy_score(out_label_ids, preds),
+  #       "f1": eval_report["weighted avg"]["f1-score"]
+  #   }
     results = {}
     if mode=="dev":
         results = {
             "eval_loss": eval_loss,
             "eval_precision": eval_report["weighted avg"]["precision"],
             "eval_recall": eval_report["weighted avg"]["recall"],
-            "eval_f1": sklearn.metrics.accuracy_score(out_label_ids, preds),
-            'eval_report': eval_report["weighted avg"]["f1-score"],
+            "eval_acc": sklearn.metrics.accuracy_score(out_label_ids, preds),
+            'eval_f1': eval_report["weighted avg"]["f1-score"],
         }
     
     elif mode=="test":
@@ -329,8 +335,8 @@ def evaluate(args, model, tokenizer, labels, mode, prefix=""):
             "predict_loss": eval_loss,
             "predict_precision": eval_report["weighted avg"]["precision"],
             "predict_recall": eval_report["weighted avg"]["recall"],
-            "predict_f1": sklearn.metrics.accuracy_score(out_label_ids, preds),
-            'predict_report': eval_report["weighted avg"]["f1-score"],
+            "predict_acc": sklearn.metrics.accuracy_score(out_label_ids, preds),
+            'predict_f1': eval_report["weighted avg"]["f1-score"],
         }
     
     wandb.log(results)
@@ -702,7 +708,7 @@ def main():
             results.update(result)
 
     if args.do_predict and args.local_rank in [-1, 0]:
-        tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+        tokenizer = XLMRobertaTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
         model = model_class.from_pretrained(args.output_dir)
         model.to(args.device)
         result, predictions = evaluate(args, model, tokenizer, labels, mode='test')
@@ -729,8 +735,6 @@ def main():
                     text_ = headline_.strip() + ". " + text_.strip()
                 output_line = text_ + "\t" + id2label[str(predictions[idx])] + "\n"
                 writer.write(output_line)
-    wandb.finish(exit_code=0)
-    return results
 
 if __name__ == "__main__":
     main()
