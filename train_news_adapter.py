@@ -559,7 +559,7 @@ def main():
 
     args = parser.parse_args()
     
-    wandb.init(project="masakhane-news-test-run", entity="double-bind-ner", tags=args.tags.split(','), config = {
+    wandb.init(project="masakhane-news-test-run", entity="double-bind-news", tags=args.tags.split(','), config = {
         "max length": os.getenv('MAX_LENGTH'),
         "adapter model": os.getenv('ADAPTER_MODEL'),
         "output dir": os.getenv('OUTPUT_DIR'),
