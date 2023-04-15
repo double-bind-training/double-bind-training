@@ -617,8 +617,8 @@ def main():
     
     adapter_name = model.load_adapter(args.path_to_adapter)
     model.set_active_adapters(adapter_name)
-        
-    model.add_tagging_head("news_head", num_labels=len(labels))
+
+    model.add_classification_head("news_head", num_labels=len(labels))
     print(model)
 
     tokenizer = tokenizer_class.from_pretrained(
