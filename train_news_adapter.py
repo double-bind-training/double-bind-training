@@ -310,10 +310,7 @@ def evaluate(args, model, tokenizer, labels, mode, prefix="", display_res=False)
     #     "f1": eval_report["weighted avg"]["f1-score"]
     # }
 
-    if not display_res:
-        logger.info("***** Eval results {} *****".format(prefix))
-        for key in sorted(results.keys()):
-            logger.info("  %s = %s", key, str(results[key]))
+    
   #  results = {
   #       "loss": eval_loss,
   #       "precision": eval_report["weighted avg"]["precision"],
@@ -339,7 +336,11 @@ def evaluate(args, model, tokenizer, labels, mode, prefix="", display_res=False)
             "predict_acc": sklearn.metrics.accuracy_score(out_label_ids, preds),
             'predict_f1': eval_report["weighted avg"]["f1-score"],
         }
-    
+    if not display_res:
+        logger.info("***** Eval results {} *****".format(prefix))
+        for key in sorted(results.keys()):
+            logger.info("  %s = %s", key, str(results[key]))
+            
     wandb.log(results)
 
     print(f"***** Eval results {prefix} *****")
@@ -460,7 +461,12 @@ def main():
         required=False,
         help="The test_result",
     )
-
+    parser.add_argument(
+        "--output_result",
+        default=None,
+        type=str,
+        help="The file the  output evaluation result.",
+    )
     # Other parameters
     parser.add_argument(
         "--labels",
@@ -468,6 +474,7 @@ def main():
         type=str,
         help="Path to a file containing all labels. If not specified, CoNLL-2003 labels are used.",
     )
+    
     parser.add_argument(
         "--config_name", default="", type=str, help="Pretrained config name or path if not the same as model_name"
     )
@@ -736,6 +743,9 @@ def main():
                     text_ = headline_.strip() + ". " + text_.strip()
                 output_line = text_ + "\t" + id2label[str(predictions[idx])] + "\n"
                 writer.write(output_line)
+
+
+    return results
 
 if __name__ == "__main__":
     main()
