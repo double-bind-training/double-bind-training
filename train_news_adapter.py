@@ -50,7 +50,7 @@ from transformers import (
 import wandb
 from utils_news import convert_examples_to_features, get_labels, read_examples_from_file
 from torch.utils.data import DataLoader
-
+import sklearn.metrics
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +201,7 @@ def train(args, train_dataset, dev_dataset, labels, model, tokenizer,  adapter_n
 
         # EVALUATE + EARLY STOPPING
         if global_step > 500 and args.n_gpu == 1: # and global_step % args.save_steps == 0:
-            eval_results, _ = evaluate(args, model, tokenizer, labels, "dev", display_res=True)
+            eval_results, _ = evaluate(args, model, tokenizer, labels, "dev")
             f1_step = round(eval_results["acc"], 5)
             eval_fones.append(f1_step)
             print("eval result: ", global_step, f1_step)
@@ -276,7 +276,7 @@ def evaluate(args, model, tokenizer, labels, mode, prefix=""):
         batch = tuple(t.to(args.device) for t in batch)
 
         with torch.no_grad():
-            inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
+            inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[-1]}
             if args.model_type != "distilbert":
                 inputs["token_type_ids"] = (
                     batch[2] if args.model_type in ["bert"] else None
