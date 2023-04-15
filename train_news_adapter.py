@@ -22,6 +22,7 @@ import os
 import random
 
 import numpy as np
+import pandas as pd
 import torch
 from seqeval.metrics import f1_score, precision_score, recall_score, classification_report
 from torch.nn import CrossEntropyLoss
@@ -309,10 +310,10 @@ def evaluate(args, model, tokenizer, labels, mode, prefix="", display_res=False)
     #     "f1": eval_report["weighted avg"]["f1-score"]
     # }
 
-    # if not display_res:
-    #     logger.info("***** Eval results {} *****".format(prefix))
-    #     for key in sorted(results.keys()):
-    #         logger.info("  %s = %s", key, str(results[key]))
+    if not display_res:
+        logger.info("***** Eval results {} *****".format(prefix))
+        for key in sorted(results.keys()):
+            logger.info("  %s = %s", key, str(results[key]))
   #  results = {
   #       "loss": eval_loss,
   #       "precision": eval_report["weighted avg"]["precision"],
@@ -708,9 +709,9 @@ def main():
             results.update(result)
 
     if args.do_predict and args.local_rank in [-1, 0]:
-        tokenizer = XLMRobertaTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-        model = model_class.from_pretrained(args.output_dir)
-        model.to(args.device)
+        tokenizer = AutoTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+        # model = model_class.from_pretrained(args.output_dir)
+        # model.to(args.device)
         result, predictions = evaluate(args, model, tokenizer, labels, mode='test')
         predictions = list(predictions)
         id2label = {str(i): label for i, label in enumerate(labels)}
