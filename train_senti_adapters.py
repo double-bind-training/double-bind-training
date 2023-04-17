@@ -22,6 +22,7 @@ import os
 import random
 
 import numpy as np
+import pandas as pd
 import torch
 from seqeval.metrics import f1_score, precision_score, recall_score, classification_report
 from torch.nn import CrossEntropyLoss
@@ -50,7 +51,7 @@ from transformers import (
 import wandb
 from utils_sentiment import convert_examples_to_features, get_labels, read_examples_from_file
 from torch.utils.data import DataLoader
-
+import sklearn.metrics
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,10 @@ MODEL_CLASSES = {
     "camembert": "",
     "xlmroberta": "",
 }
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    from tensorboardX import SummaryWriter
 
 def set_seed(args):
     random.seed(args.seed)
@@ -69,13 +74,14 @@ def set_seed(args):
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
-def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, adapter_name):
+def train(args, train_dataset, dev_dataset, labels, model, tokenizer,  adapter_name):
     model.train_adapter(adapter_name)
     """ Train the model """
-    loss_fct = torch.nn.CrossEntropyLoss()
-
+    if args.local_rank in [-1, 0]:
+      tb_writer = SummaryWriter()
+    # loss_fct = torch.nn.CrossEntropyLoss()
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
-    train_sampler = RandomSampler(train_dataset)
+    train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
     if args.max_steps > 0:
@@ -91,10 +97,7 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, ada
             "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
             "weight_decay": args.weight_decay,
         },
-        {
-            "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 
-            "weight_decay": 0.0
-        },
+        {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
     ]
     optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
     scheduler = get_linear_schedule_with_warmup(
@@ -102,56 +105,65 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, ada
     )
 
     # Check if saved optimizer or scheduler states exist
-    if os.path.isfile(os.path.join(args.model_name_or_path, "optimizer.pt")) and os.path.isfile(
-            os.path.join(args.model_name_or_path, "scheduler.pt")
+    '''
+    if os.path.isfile(os.path.join(args.model_name_or_path, "optimizer__.pt")) and os.path.isfile(
+        os.path.join(args.model_name_or_path, "scheduler__.pt")
     ):
         # Load in optimizer and scheduler states
         optimizer.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "optimizer.pt")))
         scheduler.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "scheduler.pt")))
+    '''
 
+    # multi-gpu training (should be after apex fp16 initialization)
+    if args.n_gpu > 1:
+        model = torch.nn.DataParallel(model)
+
+    # Distributed training (should be after apex fp16 initialization)
+    if args.local_rank != -1:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True
+        )
 
     # Train!
-    print("***** Running training *****")
-    print("  Num examples = ", len(train_dataset))
-    print("  Num Epochs = ", args.num_train_epochs)
-    print("  Instantaneous batch size per GPU = ", args.per_gpu_train_batch_size)
-    print(
-        "  Total train batch size (w. parallel, distributed & accumulation) = ",
+    logger.info("***** Running training *****")
+    logger.info("  Num examples = %d", len(train_dataset))
+    logger.info("  Num Epochs = %d", args.num_train_epochs)
+    logger.info("  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size)
+    logger.info(
+        "  Total train batch size (w. parallel, distributed & accumulation) = %d",
         args.train_batch_size
         * args.gradient_accumulation_steps
-        * (1),
+        * (torch.distributed.get_world_size() if args.local_rank != -1 else 1),
     )
-    print("  Gradient Accumulation steps = ", args.gradient_accumulation_steps)
-    print("  Total optimization steps = ", t_total)
+    logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
+    logger.info("  Total optimization steps = %d", t_total)
 
     global_step = 0
     epochs_trained = 0
     steps_trained_in_current_epoch = 0
     # Check if continuing training from a checkpoint
-    if os.path.exists(args.model_name_or_path):
+    '''
+    if os.path.exists(args.output_dir): #model_name_or_path):
         # set global_step to gobal_step of last saved checkpoint from model path
-        try:
-            global_step = int(args.model_name_or_path.split("-")[-1].split("/")[0])
-        except ValueError:
-            global_step = 0
+        global_step = int(args.model_name_or_path.split("-")[-1].split("/")[0])
         epochs_trained = global_step // (len(train_dataloader) // args.gradient_accumulation_steps)
         steps_trained_in_current_epoch = global_step % (len(train_dataloader) // args.gradient_accumulation_steps)
-
-        print("  Continuing training from checkpoint, will skip to saved global_step")
-        print("  Continuing training from epoch", epochs_trained)
-        print("  Continuing training from global step", global_step)
-        print(f"  Will skip the first {steps_trained_in_current_epoch} steps in the first epoch")
-
+        logger.info("  Continuing training from checkpoint, will skip to saved global_step")
+        logger.info("  Continuing training from epoch %d", epochs_trained)
+        logger.info("  Continuing training from global step %d", global_step)
+        logger.info("  Will skip the first %d steps in the first epoch", steps_trained_in_current_epoch)
+    '''
+    tr_loss, logging_loss = 0.0, 0.0
     model.zero_grad()
     train_iterator = trange(
         epochs_trained, int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0]
     )
     set_seed(args)  # Added here for reproductibility
+
+    eval_fones = []
     for _ in train_iterator:
-        tr_loss, logging_loss = 0.0, 0.0
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         for step, batch in enumerate(epoch_iterator):
-
             # Skip past any already trained steps if resuming training
             if steps_trained_in_current_epoch > 0:
                 steps_trained_in_current_epoch -= 1
@@ -159,102 +171,80 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, ada
 
             model.train()
             batch = tuple(t.to(args.device) for t in batch)
-            inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
-            if args.model_type != "distilbert":
+            inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[-1]}
+            if args.model_type not in ["distilbert", "xlmroberta"]:
                 inputs["token_type_ids"] = (
-                    batch[2] if args.model_type in ["bert", "xlnet"] else None
-                )  # XLM and RoBERTa don"t use segment_ids
+                    batch[2] if args.model_type in ["bert"] else None
+                )  # XLM and DistilBERT don't use segment_ids
+            outputs = model(**inputs)
+            loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
 
-            logits = model(inputs["input_ids"])['logits']#, attention_mask=inputs["attention_mask"], output_hidden_states=True)
-
-            active_loss = inputs["attention_mask"].view(-1) == 1
-            active_logits = logits.view(-1, args.num_labels)
-            active_labels = torch.where(
-
-                active_loss, inputs["labels"].view(-1), torch.tensor(loss_fct.ignore_index).type_as(inputs["labels"])
-            )
-            loss = loss_fct(active_logits, active_labels)
-
+            if args.n_gpu > 1:
+                loss = loss.mean()  # mean() to average on multi-gpu parallel training
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
 
             loss.backward()
 
             tr_loss += loss.item()
-
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                
+
                 optimizer.step()
                 scheduler.step()  # Update learning rate schedule
                 model.zero_grad()
                 global_step += 1
 
-                if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
-                    # Log metrics
-                    if (
-                            args.local_rank == -1 and args.evaluate_during_training
-                    ):  # Only evaluate when single GPU otherwise metrics may not average well
-                        results, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev")
-                        for key, value in results.items():
-                            wandb.log({f"eval_{key}": value})
-                    logging_loss = tr_loss
-
-                if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
-                    # Save model checkpoint
-                    output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(global_step))
-                    if not os.path.exists(output_dir):
-                        os.makedirs(output_dir)
-
-                    model_to_save = (
-                        model.module if hasattr(model, "module") else model
-                    )
-
-                    model_to_save.save_pretrained(args.output_dir)
-                    tokenizer.save_pretrained(args.output_dir)
-
-                    # Good practice: save your training arguments together with the trained model
-                    torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
-                    
-                    
-                    print("Saving model checkpoint to ", output_dir)
-
-                    torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-                    torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-                    print("Saving optimizer and scheduler states to", output_dir)
 
             if args.max_steps > 0 and global_step > args.max_steps:
                 epoch_iterator.close()
                 break
 
-        output_dir = os.path.join(args.output_dir, "checkpoint-{}".format(global_step))
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+        # EVALUATE + EARLY STOPPING
+        if global_step > 500 and args.n_gpu == 1: # and global_step % args.save_steps == 0:
+            eval_results, _ = evaluate(args, model, tokenizer, labels, "dev", display_res=True)
+            f1_step = round(eval_results["eval_acc"], 5)
+            eval_fones.append(f1_step)
+            print("eval result: ", global_step, f1_step)
 
-        model_to_save = (
-            model.module if hasattr(model, "module") else model
-        )
+            #n = 1
+            #while len(eval_fones) > 5 and n < 6 and eval_fones[-1] < eval_fones[-1 * (n + 1)]:
+            #    print("no: ", n)
+            #    n += 1
 
-        model_to_save.save_pretrained(args.output_dir)
-        tokenizer.save_pretrained(args.output_dir)
+            #if n == 6:
+            #    logger.info("EARLY STOPPING ..... ")
+            #    break
 
-        # Good practice: save your training arguments together with the trained model
-        torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
-        
-        
-        print("Saving model checkpoint to ", output_dir)
+            max_f1 = max(eval_fones)
 
-        torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-        torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-        print("Saving optimizer and scheduler states to", output_dir)
-        print("training loss", tr_loss / args.logging_steps)
-        wandb.log({
-            f"lr": scheduler.get_lr()[0],
-            f"train_loss": tr_loss / args.logging_steps
-        })
+            if f1_step == max_f1:
+                output_dir = args.output_dir
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+                model_to_save = (
+                    model.module if hasattr(model, "module") else model
+                )  # Take care of distributed/parallel training
+                model_to_save.save_pretrained(output_dir)
+                tokenizer.save_pretrained(output_dir)
+
+                torch.save(args, os.path.join(output_dir, "training_args.bin"))
+                logger.info("Saving model checkpoint to %s", output_dir)
+
+                #torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+                #torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+                #logger.info("Saving optimizer and scheduler states to %s", output_dir)
+
+
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
             break
+
+
+
+    if args.local_rank in [-1, 0]:
+        tb_writer.close()
+
 
     for i in os.listdir(args.output_dir):
         wandb.save(f"{args.output_dir}/{i}")
@@ -262,56 +252,40 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, ada
     return global_step, tr_loss / global_step
 
 
-def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""):
-    eval_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode=mode)
-
-    loss_fct = torch.nn.CrossEntropyLoss()
-
+def evaluate(args, model, tokenizer, labels, mode, prefix="", display_res=False):
+    eval_dataset = load_and_cache_examples(args, tokenizer, labels, mode)
+    
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
     # Note that DistributedSampler samples randomly
-    eval_sampler = SequentialSampler(eval_dataset) if args.local_rank == -1 else DistributedSampler(eval_dataset)
+    eval_sampler = SequentialSampler(eval_dataset)
     eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
-    # multi-gpu evaluate
-    if args.n_gpu > 1:
-        model = torch.nn.DataParallel(model)
+    # multi-gpu eval
+    #if args.n_gpu > 1:
+    #    model = torch.nn.DataParallel(model)
 
     # Eval!
-    print(f"***** Running evaluation {prefix} *****")
-    print("  Num examples =", len(eval_dataset))
-    print("  Batch size =", args.eval_batch_size)
+    logger.info("***** Running evaluation {} *****".format(prefix))
+    logger.info("  Num examples = %d", len(eval_dataset))
+    logger.info("  Batch size = %d", args.eval_batch_size)
     eval_loss = 0.0
     nb_eval_steps = 0
     preds = None
     out_label_ids = None
-
-    model.eval()
     for batch in tqdm(eval_dataloader, desc="Evaluating"):
+        model.eval()
         batch = tuple(t.to(args.device) for t in batch)
 
         with torch.no_grad():
-            inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
+            inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[-1]}
             if args.model_type != "distilbert":
                 inputs["token_type_ids"] = (
-                    batch[2] if args.model_type in ["bert", "xlnet"] else None
-                )  # XLM and RoBERTa don"t use segment_ids
-            #outputs = model(**inputs)
-            #tmp_eval_loss, logits = outputs[:2]
+                    batch[2] if args.model_type in ["bert"] else None
+                )  # XLM and DistilBERT don't use segment_ids
+            outputs = model(**inputs)
+            tmp_eval_loss, logits = outputs[:2]
 
-            logits = model(inputs["input_ids"])['logits']#, attention_mask=inputs["attention_mask"], output_hidden_states=True)
-
-            active_loss = inputs["attention_mask"].view(-1) == 1
-            active_logits = logits.view(-1, args.num_labels)
-            active_labels = torch.where(
-
-                active_loss, inputs["labels"].view(-1), torch.tensor(loss_fct.ignore_index).type_as(inputs["labels"])
-            )
-            tmp_eval_loss = loss_fct(active_logits, active_labels)
-
-            if args.n_gpu > 1:
-                tmp_eval_loss = tmp_eval_loss.mean()  # mean() to average on multi-gpu parallel evaluating
-
-            eval_loss += tmp_eval_loss.item()
+            eval_loss += tmp_eval_loss.mean().item()
         nb_eval_steps += 1
         if preds is None:
             preds = logits.detach().cpu().numpy()
@@ -321,47 +295,61 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
             out_label_ids = np.append(out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0)
 
     eval_loss = eval_loss / nb_eval_steps
-    preds = np.argmax(preds, axis=2)
+    preds = np.argmax(preds, axis=1)
+    eval_report = sklearn.metrics.classification_report(out_label_ids, preds,
+                                                        labels=range(len(labels)),
+                                                        target_names=labels,
+                                                        output_dict=True
+                                                        )
 
-    label_map = {i: label for i, label in enumerate(labels)}
+    # results = {
+    #     "loss": eval_loss,
+    #     "precision": eval_report["weighted avg"]["precision"],
+    #     "recall": eval_report["weighted avg"]["recall"],
+    #     "acc": sklearn.metrics.accuracy_score(out_label_ids, preds),
+    #     "f1": eval_report["weighted avg"]["f1-score"]
+    # }
 
-    out_label_list = [[] for _ in range(out_label_ids.shape[0])]
-    preds_list = [[] for _ in range(out_label_ids.shape[0])]
-
-    for i in range(out_label_ids.shape[0]):
-        for j in range(out_label_ids.shape[1]):
-            if out_label_ids[i, j] != pad_token_label_id:
-                out_label_list[i].append(label_map[out_label_ids[i][j]])
-                preds_list[i].append(label_map[preds[i][j]])
-
+    
+  #  results = {
+  #       "loss": eval_loss,
+  #       "precision": eval_report["weighted avg"]["precision"],
+  #       "recall": eval_report["weighted avg"]["recall"],
+  #       "acc": sklearn.metrics.accuracy_score(out_label_ids, preds),
+  #       "f1": eval_report["weighted avg"]["f1-score"]
+  #   }
     results = {}
     if mode=="dev":
         results = {
             "eval_loss": eval_loss,
-            "eval_precision": precision_score(out_label_list, preds_list),
-            "eval_recall": recall_score(out_label_list, preds_list),
-            "eval_f1": f1_score(out_label_list, preds_list),
-            'eval_report': classification_report(out_label_list, preds_list),
+            "eval_precision": eval_report["weighted avg"]["precision"],
+            "eval_recall": eval_report["weighted avg"]["recall"],
+            "eval_acc": sklearn.metrics.accuracy_score(out_label_ids, preds),
+            'eval_f1': eval_report["weighted avg"]["f1-score"],
         }
     
     elif mode=="test":
         results = {
             "predict_loss": eval_loss,
-            "predict_precision": precision_score(out_label_list, preds_list),
-            "predict_recall": recall_score(out_label_list, preds_list),
-            "predict_f1": f1_score(out_label_list, preds_list),
-            'predict_report': classification_report(out_label_list, preds_list),
+            "predict_precision": eval_report["weighted avg"]["precision"],
+            "predict_recall": eval_report["weighted avg"]["recall"],
+            "predict_acc": sklearn.metrics.accuracy_score(out_label_ids, preds),
+            'predict_f1': eval_report["weighted avg"]["f1-score"],
         }
-    
+    if not display_res:
+        logger.info("***** Eval results {} *****".format(prefix))
+        for key in sorted(results.keys()):
+            logger.info("  %s = %s", key, str(results[key]))
+            
     wandb.log(results)
 
     print(f"***** Eval results {prefix} *****")
     for key in sorted(results.keys()):
         print(f"{key} = {str(results[key])}")
 
-    return results, preds_list
+    return results, preds
 
-def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode):
+def load_and_cache_examples(args, tokenizer, labels, mode):
     if args.local_rank not in [-1, 0] and not evaluate:
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
 
@@ -377,39 +365,44 @@ def load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode):
         features = torch.load(cached_features_file)
     else:
         print("Creating features from dataset file at", args.data_dir)
-        examples = read_examples_from_file(args.data_dir, mode)
-        features = convert_examples_to_features(
-            examples,
-            labels,
-            args.max_seq_length,
-            tokenizer,
-            cls_token_at_end=bool(args.model_type in ["xlnet"]),
-            # xlnet has a cls token at the end
-            cls_token=tokenizer.cls_token,
-            cls_token_segment_id=2 if args.model_type in ["xlnet"] else 0,
-            sep_token=tokenizer.sep_token,
-            sep_token_extra=bool(args.model_type in ["roberta"]),
-            # roberta uses an extra separator b/w pairs of sentences, cf. github.com/pytorch/fairseq/commit/1684e166e3da03f5b600dbb7855cb98ddfcd0805
-            pad_on_left=bool(args.model_type in ["xlnet"]),
-            # pad on the left for xlnet
-            pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
-            pad_token_segment_id=4 if args.model_type in ["xlnet"] else 0,
-            pad_token_label_id=pad_token_label_id,
-        )
+      #  logger.info("Creating features from dataset file at %s", args.data_dir)
+        instances = read_examples_from_file(args, args.data_dir, mode)
+        features = convert_examples_to_features(instances, tokenizer, labels, args.max_seq_length)
+        if args.local_rank in [-1, 0]:
+            logger.info("Saving features into cached file %s", cached_features_file)
+            torch.save(features, cached_features_file)
+        # print("Creating features from dataset file at", args.data_dir)
+        # examples = read_examples_from_file(args,args.data_dir, mode)
+        # features = convert_examples_to_features(
+        #     examples,
+        #     labels,
+        #     args.max_seq_length,
+        #     tokenizer,
+        #     cls_token_at_end=bool(args.model_type in ["xlnet"]),
+        #     # xlnet has a cls token at the end
+        #     cls_token=tokenizer.cls_token,
+        #     cls_token_segment_id=2 if args.model_type in ["xlnet"] else 0,
+        #     sep_token=tokenizer.sep_token,
+        #     sep_token_extra=bool(args.model_type in ["roberta"]),
+        #     # roberta uses an extra separator b/w pairs of sentences, cf. github.com/pytorch/fairseq/commit/1684e166e3da03f5b600dbb7855cb98ddfcd0805
+        #     pad_on_left=bool(args.model_type in ["xlnet"]),
+        #     # pad on the left for xlnet
+        #     pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
+        #     pad_token_segment_id=4 if args.model_type in ["xlnet"] else 0,
+        #     pad_token_label_id=pad_token_label_id,
+        # )
         if args.local_rank in [-1, 0]:
             print("Saving features into cached file", cached_features_file)
             torch.save(features, cached_features_file)
 
     if args.local_rank == 0 and not evaluate:
         torch.distributed.barrier()  # Make sure only the first process in distributed training process the dataset, and the others will use the cache
-
     # Convert to Tensors and build dataset
     all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
     all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
-    all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
     all_label_ids = torch.tensor([f.label_ids for f in features], dtype=torch.long)
 
-    dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+    dataset = TensorDataset(all_input_ids, all_input_mask, all_label_ids)
     return dataset
 
 
@@ -453,7 +446,6 @@ def main():
         required=True,
         help="The output directory where the model predictions and checkpoints will be written.",
     )
-
     parser.add_argument(
         "--test_result_file",
         default="test_results.txt",
@@ -469,7 +461,12 @@ def main():
         required=False,
         help="The test_result",
     )
-
+    parser.add_argument(
+        "--output_result",
+        default=None,
+        type=str,
+        help="The file the  output evaluation result.",
+    )
     # Other parameters
     parser.add_argument(
         "--labels",
@@ -477,6 +474,7 @@ def main():
         type=str,
         help="Path to a file containing all labels. If not specified, CoNLL-2003 labels are used.",
     )
+    
     parser.add_argument(
         "--config_name", default="", type=str, help="Pretrained config name or path if not the same as model_name"
     )
@@ -561,7 +559,7 @@ def main():
 
     args = parser.parse_args()
     
-    wandb.init(project="masakhane-pos-test-run", entity="double-bind-ner", tags=args.tags.split(','), config = {
+    wandb.init(project="masakhane-sentiment-test-run", entity="double-bind-sentiment", tags=args.tags.split(','), config = {
         "max length": os.getenv('MAX_LENGTH'),
         "adapter model": os.getenv('ADAPTER_MODEL'),
         "output dir": os.getenv('OUTPUT_DIR'),
@@ -633,8 +631,8 @@ def main():
     
     adapter_name = model.load_adapter(args.path_to_adapter)
     model.set_active_adapters(adapter_name)
-        
-    model.add_tagging_head("pos_head", num_labels=len(labels))
+
+    model.add_classification_head("sentment_head", num_labels=len(labels))
     print(model)
 
     tokenizer = tokenizer_class.from_pretrained(
@@ -652,10 +650,15 @@ def main():
 
     # Training
     if args.do_train:
-        train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train")
+        # train_dataset = load_and_cache_examples(args, tokenizer, labels, pad_token_label_id, mode="train")
         #train_dataset = load_examples(args, mode="train")
-        global_step, tr_loss = train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, adapter_name)
+        # global_step, tr_loss = train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, adapter_name)
         #global_step, tr_loss = train_ner(args, train_dataset, model, tokenizer, labels, pad_token_label_id)
+        train_dataset = load_and_cache_examples(args, tokenizer, labels, mode="train")
+        dev_dataset = load_and_cache_examples(args, tokenizer, labels, mode="dev")
+        global_step, tr_loss = train(args, train_dataset, dev_dataset, labels, model, tokenizer,adapter_name)
+        logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
+
         print(f" global_step = {global_step}, average loss = {tr_loss}")
 
     # Fine-tuning
@@ -672,7 +675,7 @@ def main():
         print(f" global_step = {global_step}, average loss = {tr_loss}")
 
     # Saving best-practices: if you use defaults names for the model, you can reload it using from_pretrained()
-    if (args.do_train or args.do_finetune) and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
+    if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
         # Create output directory if needed
         if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
             os.makedirs(args.output_dir)
@@ -690,7 +693,7 @@ def main():
 
         # Good practice: save your training arguments together with the trained model
         torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
-
+    
     # Evaluation
     results = {}
     if args.do_eval and args.local_rank in [-1, 0]:
@@ -704,49 +707,44 @@ def main():
         print("Evaluate the following checkpoints: ", checkpoints)
         for checkpoint in checkpoints:
             global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
+            prefix = checkpoint.split("/")[-1] if checkpoint.find("checkpoint") != -1 else ""
 
-            #model = model_class.from_pretrained(checkpoint)
-            #model.set_active_adapters("mlm")
-            #model.to(args.device)
-            
-            #print(model)
-            result, _ = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="dev", prefix=global_step)
-            if global_step:
-                result = {"{}_{}".format(global_step, k): v for k, v in result.items()}
+            model = model_class.from_pretrained(checkpoint)
+            model.to(args.device)
+            result, _ = evaluate(args, model, tokenizer, labels, mode='dev', prefix=prefix)
+            result = dict((k + "_{}".format(global_step), v) for k, v in result.items())
             results.update(result)
-        output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
-        with open(output_eval_file, "w") as writer:
-            for key in sorted(results.keys()):
-                writer.write("{} = {}\n".format(key, str(results[key])))
 
     if args.do_predict and args.local_rank in [-1, 0]:
-        tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-        #model = model_class.from_pretrained(args.output_dir)
-        #model.set_active_adapters("mlm")
-        #model.to(args.device)
-        result, predictions = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode="test")
+        tokenizer = AutoTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+        # model = model_class.from_pretrained(args.output_dir)
+        # model.to(args.device)
+        result, predictions = evaluate(args, model, tokenizer, labels, mode='test')
+        predictions = list(predictions)
+        id2label = {str(i): label for i, label in enumerate(labels)}
+
         # Save results
-        output_test_results_file = os.path.join(args.output_dir, args.test_result_file)
+        output_test_results_file = os.path.join(args.output_dir, args.output_result+".txt")
         with open(output_test_results_file, "w") as writer:
             for key in sorted(result.keys()):
                 writer.write("{} = {}\n".format(key, str(result[key])))
-        # Save predictions
-        output_test_predictions_file = os.path.join(args.output_dir, args.test_prediction_file)
-        with open(output_test_predictions_file, "w") as writer:
-            with open(os.path.join(args.data_dir, "test.txt"), "r") as f:
-                example_id = 0
-                for line in f:
-                    if line.startswith("-DOCSTART-") or line == "" or line == "\n":
-                        writer.write(line)
-                        if not predictions[example_id]:
-                            example_id += 1
-                    elif predictions[example_id]:
-                        output_line = line.split()[0] + " " + predictions[example_id].pop(0) + "\n"
-                        writer.write(output_line)
-                    else:
-                        logger.warning("Maximum sequence length exceeded: No prediction for '%s'.", line.split()[0])
-    
-    wandb.finish(exit_code=0)
+
+        output_test_predictions_file = os.path.join(args.output_dir, args.output_prediction_file+".txt")
+        with open(output_test_predictions_file, "w", encoding='utf-8') as writer:
+            test_path = os.path.join(args.data_dir, "test.tsv")
+            test_set = pd.read_csv(test_path, delimiter = "\t")
+            
+            texts = test_set['text'].values
+            labels = test_set['category'].values
+            headlines  = test_set['headline'].values
+
+            for idx, (text_, headline_, label_) in enumerate(zip(texts, headlines, labels)):
+                if int(args.header) == 1:
+                    text_ = headline_.strip() + ". " + text_.strip()
+                output_line = text_ + "\t" + id2label[str(predictions[idx])] + "\n"
+                writer.write(output_line)
+
+
     return results
 
 if __name__ == "__main__":

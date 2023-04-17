@@ -22,6 +22,7 @@ import os
 import random
 
 import numpy as np
+import pandas as pd
 import torch
 from seqeval.metrics import f1_score, precision_score, recall_score, classification_report
 from torch.nn import CrossEntropyLoss
@@ -50,7 +51,7 @@ from transformers import (
 import wandb
 from utils_news import convert_examples_to_features, get_labels, read_examples_from_file
 from torch.utils.data import DataLoader
-
+import sklearn.metrics
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,7 @@ def set_seed(args):
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
-def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, adapter_name):
+def train(args, train_dataset, dev_dataset, labels, model, tokenizer,  adapter_name):
     model.train_adapter(adapter_name)
     """ Train the model """
     if args.local_rank in [-1, 0]:
@@ -202,7 +203,7 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, ada
         # EVALUATE + EARLY STOPPING
         if global_step > 500 and args.n_gpu == 1: # and global_step % args.save_steps == 0:
             eval_results, _ = evaluate(args, model, tokenizer, labels, "dev", display_res=True)
-            f1_step = round(eval_results["acc"], 5)
+            f1_step = round(eval_results["eval_acc"], 5)
             eval_fones.append(f1_step)
             print("eval result: ", global_step, f1_step)
 
@@ -239,7 +240,17 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, ada
             train_iterator.close()
             break
 
+    output_dir = args.output_dir
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    model_to_save = (
+        model.module if hasattr(model, "module") else model
+    )  # Take care of distributed/parallel training
+    model_to_save.save_pretrained(output_dir)
+    tokenizer.save_pretrained(output_dir)
 
+    torch.save(args, os.path.join(output_dir, "training_args.bin"))
+    logger.info("Saving model checkpoint to %s", output_dir)
 
     if args.local_rank in [-1, 0]:
         tb_writer.close()
@@ -251,7 +262,7 @@ def train(args, train_dataset, model, tokenizer, labels, pad_token_label_id, ada
     return global_step, tr_loss / global_step
 
 
-def evaluate(args, model, tokenizer, labels, mode, prefix=""):
+def evaluate(args, model, tokenizer, labels, mode, prefix="", display_res=False):
     eval_dataset = load_and_cache_examples(args, tokenizer, labels, mode)
     
     args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
@@ -276,7 +287,7 @@ def evaluate(args, model, tokenizer, labels, mode, prefix=""):
         batch = tuple(t.to(args.device) for t in batch)
 
         with torch.no_grad():
-            inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
+            inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[-1]}
             if args.model_type != "distilbert":
                 inputs["token_type_ids"] = (
                     batch[2] if args.model_type in ["bert"] else None
@@ -309,19 +320,22 @@ def evaluate(args, model, tokenizer, labels, mode, prefix=""):
     #     "f1": eval_report["weighted avg"]["f1-score"]
     # }
 
-    # if not display_res:
-    #     logger.info("***** Eval results {} *****".format(prefix))
-    #     for key in sorted(results.keys()):
-    #         logger.info("  %s = %s", key, str(results[key]))
-
+    
+  #  results = {
+  #       "loss": eval_loss,
+  #       "precision": eval_report["weighted avg"]["precision"],
+  #       "recall": eval_report["weighted avg"]["recall"],
+  #       "acc": sklearn.metrics.accuracy_score(out_label_ids, preds),
+  #       "f1": eval_report["weighted avg"]["f1-score"]
+  #   }
     results = {}
     if mode=="dev":
         results = {
             "eval_loss": eval_loss,
             "eval_precision": eval_report["weighted avg"]["precision"],
             "eval_recall": eval_report["weighted avg"]["recall"],
-            "eval_f1": sklearn.metrics.accuracy_score(out_label_ids, preds),
-            'eval_report': eval_report["weighted avg"]["f1-score"],
+            "eval_acc": sklearn.metrics.accuracy_score(out_label_ids, preds),
+            'eval_f1': eval_report["weighted avg"]["f1-score"],
         }
     
     elif mode=="test":
@@ -329,10 +343,14 @@ def evaluate(args, model, tokenizer, labels, mode, prefix=""):
             "predict_loss": eval_loss,
             "predict_precision": eval_report["weighted avg"]["precision"],
             "predict_recall": eval_report["weighted avg"]["recall"],
-            "predict_f1": sklearn.metrics.accuracy_score(out_label_ids, preds),
-            'predict_report': eval_report["weighted avg"]["f1-score"],
+            "predict_acc": sklearn.metrics.accuracy_score(out_label_ids, preds),
+            'predict_f1': eval_report["weighted avg"]["f1-score"],
         }
-    
+    if not display_res:
+        logger.info("***** Eval results {} *****".format(prefix))
+        for key in sorted(results.keys()):
+            logger.info("  %s = %s", key, str(results[key]))
+            
     wandb.log(results)
 
     print(f"***** Eval results {prefix} *****")
@@ -453,7 +471,12 @@ def main():
         required=False,
         help="The test_result",
     )
-
+    parser.add_argument(
+        "--output_result",
+        default=None,
+        type=str,
+        help="The file the  output evaluation result.",
+    )
     # Other parameters
     parser.add_argument(
         "--labels",
@@ -461,6 +484,7 @@ def main():
         type=str,
         help="Path to a file containing all labels. If not specified, CoNLL-2003 labels are used.",
     )
+    
     parser.add_argument(
         "--config_name", default="", type=str, help="Pretrained config name or path if not the same as model_name"
     )
@@ -617,8 +641,8 @@ def main():
     
     adapter_name = model.load_adapter(args.path_to_adapter)
     model.set_active_adapters(adapter_name)
-        
-    model.add_tagging_head("news_head", num_labels=len(labels))
+
+    model.add_classification_head("news_head", num_labels=len(labels))
     print(model)
 
     tokenizer = tokenizer_class.from_pretrained(
@@ -695,27 +719,27 @@ def main():
             global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
             prefix = checkpoint.split("/")[-1] if checkpoint.find("checkpoint") != -1 else ""
 
-            model = model_class.from_pretrained(checkpoint)
-            model.to(args.device)
+            #model = model_class.from_pretrained(checkpoint)
+            #model.to(args.device)
             result, _ = evaluate(args, model, tokenizer, labels, mode='dev', prefix=prefix)
             result = dict((k + "_{}".format(global_step), v) for k, v in result.items())
             results.update(result)
 
     if args.do_predict and args.local_rank in [-1, 0]:
-        tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-        model = model_class.from_pretrained(args.output_dir)
-        model.to(args.device)
+        tokenizer = AutoTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+        # model = model_class.from_pretrained(args.output_dir)
+        # model.to(args.device)
         result, predictions = evaluate(args, model, tokenizer, labels, mode='test')
         predictions = list(predictions)
         id2label = {str(i): label for i, label in enumerate(labels)}
 
         # Save results
-        output_test_results_file = os.path.join(args.output_dir, args.output_result+".txt")
+        output_test_results_file = os.path.join(args.output_dir,"result.txt")
         with open(output_test_results_file, "w") as writer:
             for key in sorted(result.keys()):
                 writer.write("{} = {}\n".format(key, str(result[key])))
 
-        output_test_predictions_file = os.path.join(args.output_dir, args.output_prediction_file+".txt")
+        output_test_predictions_file = os.path.join(args.output_dir, "prediction_result.txt")
         with open(output_test_predictions_file, "w", encoding='utf-8') as writer:
             test_path = os.path.join(args.data_dir, "test.tsv")
             test_set = pd.read_csv(test_path, delimiter = "\t")
@@ -725,10 +749,10 @@ def main():
             headlines  = test_set['headline'].values
 
             for idx, (text_, headline_, label_) in enumerate(zip(texts, headlines, labels)):
-                if int(args.header) == 1:
-                    text_ = headline_.strip() + ". " + text_.strip()
+                text_ = headline_.strip() + ". " + text_.strip()
                 output_line = text_ + "\t" + id2label[str(predictions[idx])] + "\n"
                 writer.write(output_line)
+
     wandb.finish(exit_code=0)
     return results
 
