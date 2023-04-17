@@ -728,7 +728,7 @@ def main():
             results.update(result)
 
     if args.do_predict and args.local_rank in [-1, 0]:
-        tokenizer = AutoTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+        tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
         # model = model_class.from_pretrained(args.output_dir)
         # model.to(args.device)
         result, predictions = evaluate(args, model, tokenizer, labels, mode='test')
