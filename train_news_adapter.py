@@ -240,7 +240,17 @@ def train(args, train_dataset, dev_dataset, labels, model, tokenizer,  adapter_n
             train_iterator.close()
             break
 
+    output_dir = args.output_dir
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    model_to_save = (
+        model.module if hasattr(model, "module") else model
+    )  # Take care of distributed/parallel training
+    model_to_save.save_pretrained(output_dir)
+    tokenizer.save_pretrained(output_dir)
 
+    torch.save(args, os.path.join(output_dir, "training_args.bin"))
+    logger.info("Saving model checkpoint to %s", output_dir)
 
     if args.local_rank in [-1, 0]:
         tb_writer.close()
@@ -709,8 +719,8 @@ def main():
             global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
             prefix = checkpoint.split("/")[-1] if checkpoint.find("checkpoint") != -1 else ""
 
-            model = model_class.from_pretrained(checkpoint)
-            model.to(args.device)
+            #model = model_class.from_pretrained(checkpoint)
+            #model.to(args.device)
             result, _ = evaluate(args, model, tokenizer, labels, mode='dev', prefix=prefix)
             result = dict((k + "_{}".format(global_step), v) for k, v in result.items())
             results.update(result)
@@ -724,12 +734,12 @@ def main():
         id2label = {str(i): label for i, label in enumerate(labels)}
 
         # Save results
-        output_test_results_file = os.path.join(args.output_dir, args.output_result+".txt")
+        output_test_results_file = os.path.join(args.output_dir,"result.txt")
         with open(output_test_results_file, "w") as writer:
             for key in sorted(result.keys()):
                 writer.write("{} = {}\n".format(key, str(result[key])))
 
-        output_test_predictions_file = os.path.join(args.output_dir, args.output_prediction_file+".txt")
+        output_test_predictions_file = os.path.join(args.output_dir, "prediction_result.txt")
         with open(output_test_predictions_file, "w", encoding='utf-8') as writer:
             test_path = os.path.join(args.data_dir, "test.tsv")
             test_set = pd.read_csv(test_path, delimiter = "\t")
@@ -739,12 +749,11 @@ def main():
             headlines  = test_set['headline'].values
 
             for idx, (text_, headline_, label_) in enumerate(zip(texts, headlines, labels)):
-                if int(args.header) == 1:
-                    text_ = headline_.strip() + ". " + text_.strip()
+                text_ = headline_.strip() + ". " + text_.strip()
                 output_line = text_ + "\t" + id2label[str(predictions[idx])] + "\n"
                 writer.write(output_line)
 
-
+    wandb.finish(exit_code=0)
     return results
 
 if __name__ == "__main__":
